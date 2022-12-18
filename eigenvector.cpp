@@ -44,16 +44,26 @@ void symmetrize(matrix<double> a)
     }
 }
 
-double eigenvalue(matrix<double> A, MPI_Comm comm)
+double eigenvalue(matrix<double> A, MPI_Comm comm, int* sendcounts)
 {
     ptrdiff_t n = A.ncols(), m = A.nrows();
     vec<double> v0(n);
     vec<double> v1(n);
 
-    int myrank;
+    int myrank, world_size;
 
     MPI_Comm_rank(comm, &myrank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
+    int *scounts = new int[world_size];
+    int *displs = new int[world_size];
+    int current_display = 0;
+
+    for (int i = 0; i < world_size; i++) {
+        scounts[i] = sendcounts[i] / n;
+        displs[i] = current_display;
+        current_display += scounts[i];
+    }
     // generate a random vector on rank 0 and broadcast it
     if (myrank == 0)
     {
@@ -69,7 +79,7 @@ double eigenvalue(matrix<double> A, MPI_Comm comm)
 
     double rq, diff = 1.0;
     int niter = 0;
-    while (abs(diff) > 1e-15)
+    while (std::abs(diff) > 1e-15)
     {
         // normalize v0
         double norm2 = 0;
@@ -93,7 +103,8 @@ double eigenvalue(matrix<double> A, MPI_Comm comm)
             }
         }
 
-        MPI_Allgather(v1.raw_ptr() + ilocal_start, m, MPI_DOUBLE, v1.raw_ptr(), m, MPI_DOUBLE, comm);
+        // Соберем все процессы
+        MPI_Allgatherv(v1.raw_ptr() + ilocal_start, m, MPI_DOUBLE, v1.raw_ptr(), scounts, displs, MPI_DOUBLE, comm);
 
         // Rayleigh quotient = (x' A x) / (x' x) = dot(v0, v1)
         rq = 0;
@@ -105,7 +116,7 @@ double eigenvalue(matrix<double> A, MPI_Comm comm)
         for (j=0; j<n; j++)
         {
             double d = v1(j) / rq - v0(j);
-            if (abs(d) > diff)
+            if (std::abs(d) > diff)
             {
                 diff = d;
             }
@@ -127,17 +138,16 @@ void read_integer(int* n, int rank, MPI_Comm comm)
     {
         std::cin >> *n;
     }
-
+    // Отправим сообщение всем процессам
     MPI_Bcast(n, 1, MPI_INT, 0, comm);
 }
 
 // scatter matrix `source` over processes in communicator `comm` from `root`
-void scatter_matrix(matrix<double> source, matrix<double> dest, int root, MPI_Comm comm)
+void scatter_matrix(matrix<double> source, matrix<double> dest, int root, int* sendcounts, int* displs, int myrank, MPI_Comm comm)
 {
-    int n = dest.ncols(), m_each = dest.nrows();
-
     double *src_ptr = source.raw_ptr(), *dest_ptr = dest.raw_ptr();
-    MPI_Scatter(src_ptr, m_each * n, MPI_DOUBLE, dest_ptr, m_each * n, MPI_DOUBLE, root, comm);
+    // recvcount = sendcounts[myrank] - количество элементов, которые пойдут на i-й процесс
+    MPI_Scatterv(src_ptr, sendcounts, displs, MPI_DOUBLE, dest_ptr, sendcounts[myrank], MPI_DOUBLE, root, comm);
 }
 
 int main(int argc, char* argv[])
@@ -151,25 +161,47 @@ int main(int argc, char* argv[])
 
     read_integer(&n, myrank, MPI_COMM_WORLD);
     
-    // assuming n is multiple of world_size
-    matrix<double> A(n / world_size, n);
+    // Теущий сдвиг
+    int current_display = 0;
+    // Остаток от размерности матрицы, деленной на количество процессов
+    int remain = n % world_size;
+    // Целочисленный массив, в i-ячейках которого хранится количество данных, которые пойдут на i-тый процесс
+    int *sendcounts = new int[world_size];
+    // Целочисленный массив сдвигов относительно начала передаваемых данных
+    int *displs = new int[world_size];
+
+    // Рассчитаем массивы sendcounts и displs. Итерируемся по числу процессов
+    for (int i = 0; i < world_size; i++) {
+        displs[i] = current_display;
+        // Количество элементов (чисел), принимаемых i-м процессом 
+        sendcounts[i] = int(n / world_size) * n; 
+        // Распределим (более-менее) равномерно по процессам остаток от деления
+        if (remain > 0) {
+           sendcounts[i] += n;  // так как в каждой строке n элементов
+           remain--;
+        }
+        current_display += sendcounts[i];
+    }
+
+    // Создадим матрицу (=часть исхохной матрицы)
+    matrix<double> A(sendcounts[myrank] / n, n);
+
     // generate matrix on rank 0 (for simplicity)
     if (myrank == 0)
     {
         matrix<double> A_all(n, n);
         fill_random(A_all, 1.0, 9876);
         symmetrize(A_all);
-
-        scatter_matrix(A_all, A, 0, MPI_COMM_WORLD);
+        scatter_matrix(A_all, A, 0, sendcounts, displs, myrank, MPI_COMM_WORLD);
     }
     else
     {
-        scatter_matrix(A, A, 0, MPI_COMM_WORLD);
+        scatter_matrix(A, A, 0, sendcounts, displs, myrank, MPI_COMM_WORLD);
     }
 
     double t0 = MPI_Wtime();
 
-    double q = eigenvalue(A, MPI_COMM_WORLD);
+    double q = eigenvalue(A, MPI_COMM_WORLD, sendcounts);
 
     double t1 = MPI_Wtime();
 
