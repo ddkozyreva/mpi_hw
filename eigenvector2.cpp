@@ -53,7 +53,6 @@ double eigenvalue(matrix<double> A, MPI_Comm comm, int* sendcounts, int* displs)
     int myrank, world_size;
 
     MPI_Comm_rank(comm, &myrank);
-    // MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
     // generate a random vector on rank 0 and broadcast it
     if (myrank == 0)
@@ -117,10 +116,10 @@ double eigenvalue(matrix<double> A, MPI_Comm comm, int* sendcounts, int* displs)
         MPI_Reduce(&buf_diff, &diff, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
         MPI_Bcast(&diff, 1, MPI_DOUBLE, 0, comm);
 
-    //     // Соберем все процессы
+     // Соберем все процессы
         MPI_Allgatherv(v1.raw_ptr() + ilocal_start, sendcounts[myrank], MPI_DOUBLE, v1.raw_ptr(), sendcounts, displs, MPI_DOUBLE, comm);
         
-    //     // swap v1 and v0
+     // swap v1 and v0
         vec<double> tmp = v0;
         v0 = v1;
         v1 = tmp;
